@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pinqued-tools"
+dynamic = ["version"]
+description = 'Classes and utility functions for PINQUED project'
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = []
+authors = [
+  { name = "Michael Vorobiov", email = "mvorobiov@wm.edu" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [    
+    "qolab",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pyvisa",
+    "h5py",
+    "pandas"
+]
+
+[project.urls]
+Documentation = "https://github.com/Michael Vorobiov/pinqued-tools#readme"
+Issues = "https://github.com/Michael Vorobiov/pinqued-tools/issues"
+Source = "https://github.com/Michael Vorobiov/pinqued-tools"
+
+[tool.hatch.version]
+path = "src/pinqued_tools/__about__.py"
+
+[tool.hatch.envs.types]
+extra-dependencies = [
+  "mypy>=1.0.0",
+]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/pinqued_tools tests}"
+
+[tool.coverage.run]
+source_pkgs = ["pinqued_tools", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/pinqued_tools/__about__.py",
+]
+
+[tool.hatch.build.targets.wheel]
+      packages = ["src/pinqued_tools"]
+
+[tool.coverage.paths]
+pinqued_tools = ["src/pinqued_tools", "*/pinqued-tools/src/pinqued_tools"]
+tests = ["tests", "*/pinqued-tools/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
