@@ -13,6 +13,9 @@ from lmfit import Model
 from scipy.signal import find_peaks
 import os
 
+from plotting import set_mpl_style, lprobe_plot
+set_mpl_style('nature')
+
 #%%
 
 def generate_dummy_data():
@@ -260,6 +263,9 @@ def fit_electron_slope(V_measured: np.ndarray, I_measured: np.ndarray,I_sigma: n
                        Te: float, T_ebeam: float):
     """
     Fits the electron current slope with a two-temperature model.
+
+    #NOTE: This function needs to be checked. I am not sure if 
+            logarithm should be used. So far I followed blog post
     """
     def model_func(x, Ie, T1):
         return  np.log(Ie) + (x - V_float) / T1
@@ -359,7 +365,7 @@ if __name__ == "__main__":
     path = "G:\\My Drive\\Vaults\\WnM-AMO\\__Data\\2025-10-21\\data\\"
     date = "2025-10-21"
 
-    data_numbers = [6,8,9,11,13,14,15,16,18,19,20,21,22,23,24,25,26,27,28,29,30,32,33]
+    data_numbers = [20,21,22,23,24,25,26,27,28,29,30,32,33]
 
     electron_temperatures = []
     electron_temperatures_err = []
@@ -368,13 +374,15 @@ if __name__ == "__main__":
 
 
     for data_number in data_numbers:
+        if data_number > 21: break
         file_name = f"data-lprobe-{date}_{data_number}.csv"
         data_path =  os.path.join(path, file_name)
         V_raw, I_raw, _ = np.genfromtxt(data_path, delimiter=',', skip_header=2, unpack=True)
 
-
-
         plasma_dict = plasma_parameters(V_raw, I_raw)
+        plasma_dict.update({'data_number': data_number,
+                            'date': date})
+
 
         current_best = plasma_dict['fit_result'].best_values['Ie']
         temp_electron_best = plasma_dict['fit_result'].best_values['T1']
@@ -382,98 +390,9 @@ if __name__ == "__main__":
 
         # 5. Create Plots
         # Create a figure with a GridSpec layout
-
-
-
-        fig = plt.figure(figsize=(12, 12))
-        gs = fig.add_gridspec(3, 2, height_ratios=[3, 1, 2], width_ratios=[2, 1])
-
-        fig.suptitle(f'Langmuir Probe Analysis via Gaussian Process\
-                     \nData Set #{data_number} ({date})', fontsize=16)
-
-        # Add subplots to the grid
-        ax1 = fig.add_subplot(gs[0, 0])
-        ax2 = fig.add_subplot(gs[1, 0], sharex=ax1)
-        ax3 = fig.add_subplot(gs[2, 0], sharex=ax1)
-        ax4 = fig.add_subplot(gs[0, 1])  # Ion current plot
-
-        # Hide x-tick labels for upper plots sharing the x-axis
-        plt.setp(ax1.get_xticklabels(), visible=False)
-        plt.setp(ax2.get_xticklabels(), visible=False)
-
-        # --- Top Plot: I-V Curve ---
-        # ax1.plot(V_fit, I_slope_fit, color='C3')
-        ax1.plot(V_raw, fit_line, color='C3', linestyle='--', linewidth=2)
-        ax1.plot(plasma_dict['V_electron'], plasma_dict['I_electron'], color='gray', alpha=0.5, label="Raw current")
-        ax1.scatter(plasma_dict['V_train'], plasma_dict['I_train'], label='Measured Electron Current', 
-                    c='k', marker='.', s=20, zorder=5, alpha=0.5)
-        ax1.plot(plasma_dict['V_fit'], plasma_dict['I_fit'], 'r-', linewidth=2, label='GP Mean Fit')
-        ax1.fill_between(plasma_dict['V_fit'],plasma_dict['I_fit'] - 1.96*plasma_dict['sigma'], plasma_dict['I_fit'] + 1.96*plasma_dict['sigma'], 
-                         color='r', alpha=0.2, label='Uncertainty (type B)')
-        ax1.axvline(plasma_dict['V_plasma'], color='g', linestyle='-.', linewidth=2, 
-                    label=f'Plasma Potential $Vp = {plasma_dict['V_plasma']:.2f}$ V')
-        ax1.set_yscale('log')
-        ax1.set_ylabel('Electron Current (A)')
-        ax1.grid(True, linestyle='--', alpha=0.6)
-        ax1.set_ylim([1e-6,5e-4])
-        ax1.set_xlim([-6,15])
-        ax1.legend()
-
-        # --- Middle Plot: Residuals ---
-        ax2.plot(plasma_dict['V_train'], plasma_dict['residuals'], 'k.', markersize=4)
-        ax2.axhline(0, color='r', linestyle='--', linewidth=1)
-        ax2.set_ylabel('Residuals (A)')
-        ax2.grid(True, linestyle='--', alpha=0.6)
-
-        # --- Bottom Plot: First and Second Derivatives ---
-        ax3_twin = ax3.twinx() # Create a twin y-axis
-
-        # Plot First Derivative on the left axis (ax3)
-        p1, = ax3.plot(plasma_dict['V_fit'], 1/plasma_dict['dlnI_dV'], 'm-', linewidth=2, label='$T_e$')
-        ax3.set_xlabel('Probe Voltage (V)')
-        ax3.set_ylabel('Electron temperature (eV)', color='m')
-        ax3.tick_params(axis='y', labelcolor='m')
-        ax3.grid(True, linestyle='--', alpha=0.6)
-
-        # Plot Second Derivative on the right axis (ax3_twin)
-        p2, = ax3_twin.plot(plasma_dict['V_fit'], plasma_dict['dI_dV'], 'b-', linewidth=2, label='$dI/dV$')
-        ax3_twin.set_ylabel('$dI/dV$ (A/V)', color='b')
-        ax3_twin.tick_params(axis='y', labelcolor='b')
-        ax3_twin.set_ylim(bottom=-1e-5)
-
-        # Mark the plasma potential
-        ax3.axvline(plasma_dict['V_plasma'], color='g', linestyle='-.', linewidth=2, 
-                    label=f'Plasma Potential $V_p = {plasma_dict['V_plasma']:.2f}$ V')
-        # ax3.axhline(1/Te, color='g', linestyle='-.', linewidth=2, 
-                    # label=f'Temp $T_e = {Te:.2f}$ eV')
-
-        # Combine legends for ax3 and ax3_twin
-        plots = [p1, p2]
-        ax3.legend(plots, [p.get_label() for p in plots], loc='best')
-        ax3.set_ylim(bottom=0, top=5)
-        ax3_twin.set_ylim(bottom=-1e-6)
-
-
-        # --- Ion current plot ---
-        ax4.scatter(plasma_dict['V_ion'], plasma_dict['I_ion'], label='Measured Ion Current', 
-                    c='k', marker='.', s=2)
-        # ax4.scatter(V_ion, (-I_ion)**(4/3), label='Measured Ion Current', 
-        #             c='k', marker='.', s=2)
-        ax4.plot(plasma_dict['V_ion'],plasma_dict['I_ion_fit'], 'r-', linewidth=2, label='Ion sat. fit')
-        # ax4.plot(V_ion, 1e-3*np.power((-V_ion + 5), -1.1)-1.2e-4)
-        ax4.set_ylabel('Ion Current (A)')
-        ax4.grid(True, linestyle='--', alpha=0.6)
-        ax4.legend()
-
-        text_string = f'Electron temp: $T_e = {plasma_dict["fit_result"].params["T1"].value:.2f}\\pm{plasma_dict["fit_result"].params["T1"].stderr:.2f}$ eV\n\
-Plasma potential: $V_p = {plasma_dict["V_plasma"]:.2f}$ V\n\
-Floating potential: $V_f = {plasma_dict["V_float"]:.2f}$ V'
-        fig.text(x=0.7, y=0.4, s=text_string, fontsize=16)
-
-        # Adjust the layout
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.96])
-        fig.savefig(f'data_lprobe_{date}_{data_number}.png')
+        fig = lprobe_plot(plasma_dict, figsize=(7,5),
+                          xlim=(-5.0,15.0), ylim=(1e-6,1e-3))
+        fig.savefig(os.path.join(path, f'data_lprobe-{date}-{data_number}.png'))
 
         electron_temperatures.append(plasma_dict['fit_result'].params['T1'].value)
         electron_temperatures_err.append(plasma_dict['fit_result'].params['T1'].stderr)
@@ -484,7 +403,7 @@ Floating potential: $V_f = {plasma_dict["V_float"]:.2f}$ V'
 
 import pandas as pd
 
-table_dict = {'#': data_numbers,
+table_dict = {'#': data_numbers[:2],
               'Electron temperature (eV)': electron_temperatures,
               'Electron temperature error (eV)': electron_temperatures_err,
               'Plasma potential (V)': plasma_potentials,
