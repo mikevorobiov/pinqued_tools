@@ -31,7 +31,8 @@ dependencies = [
     "matplotlib",
     "pyvisa",
     "h5py",
-    "pandas"
+    "pandas",
+    "scikit-learn",
 ]
 
 [project.urls]
