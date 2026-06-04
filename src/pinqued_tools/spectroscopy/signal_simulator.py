@@ -57,7 +57,7 @@ class SignalSimulator():
              hline = HoltsmarkLine(efield_reference, stark_reference)
              # 1. Define your 4D parameter space
              freq_grid = np.linspace(-1200, 400, 300)  # <-- The frequency axis for the LUT
-             efield_grid = np.linspace(0.0, 45.0, 60)
+             efield_grid = np.linspace(0.0, 80.0, 100)
              E0_grid = np.linspace(1e-5, 2.0, 20)
              width_grid = np.linspace(20.0, 50.0, 10)  # <-- The new dimension
              hline.build_lut(freq_grid, efield_grid, E0_grid, width_grid, base_model='2d')
@@ -165,7 +165,7 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
                            grad_vec: float|None = None,
                            E0: float|None = None,
                            amp: float|None = None,
-                           n_subsamples: int = 5
+                           n_subsamples: int = 20
                            ) -> NDArray:
         '''
         Simulate EIT signal for a given electric field using the Holtsmark lineshape.
@@ -174,6 +174,7 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
 
         scale_factor = params['amp'].value if amp is None else amp
         width = params['width'].value
+        grad_correct = params['grad_correct'].value if 'grad_correct' in params else 0.0
 
         r_amp = [params[f'rel_amp_{i}'].value for i in range(len(self._hline_list))]
         
@@ -190,7 +191,7 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
                 offsets = np.linspace(-0.5, 0.5, n_subsamples)
                 for offset in offsets:
                     # Ensure absolute efield to prevent negative LUT queries
-                    efield_smear = np.abs(efield + grad_vec * self.px_size * offset)
+                    efield_smear = np.abs(efield + (grad_correct * efield * self.px_size * offset))
                     hline_smeared += hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
                 hline_smeared /= n_subsamples
             else:

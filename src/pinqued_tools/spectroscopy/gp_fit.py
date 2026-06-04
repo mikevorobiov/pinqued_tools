@@ -282,7 +282,7 @@ class BSplinePoissonModel1D():
             
         # Constrain E0 to a physical ceiling
         for i in range(self.n_splines):
-            params.add(f'c_E0_{i}', value=c_E0_init[i], min=1e-10, max=25.0, vary=True)
+            params.add(f'c_E0_{i}', value=c_E0_init[i], min=1e-20, max=2.0, vary=True)
             
         # Enforce E -> 0 at the boundary deep in the plasma.
         # if self.n_splines > 1 and self.zero_bnd_efield:
@@ -479,3 +479,257 @@ class BSplinePoissonModel1D_numba(BSplinePoissonModel1D):
         )
         
         return np.concatenate([data_res, prior_res, prior_res_E0, prior_res_b0, prior_res_b1, prior_res_amp])
+
+
+
+#---------------------------------------------------------------------------------------------------
+# GLOBAL E0 VERSION WITH NUMBA ACCELERATION (NO SPATIAL VARIATION IN HOLTSMARK FIELD)
+@njit(fastmath=True, cache=True)
+def _bspline_eval_vectors_numba_global_E0(c, c_b0, c_b1, c_amp, B, B_d1, B_d2):
+    # Fast BLAS matrix multiplications
+    phi_vec = B @ c
+    E_vec = -(B_d1 @ c) * 10.0
+    grad_vec = -(B_d2 @ c) * 10.0
+    b0_vec = B @ c_b0
+    b1_vec = B @ c_b1
+    amp_vec = B @ c_amp
+    return phi_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec
+
+
+@njit(fastmath=True, cache=True)
+def _calc_prior_res_numba_global_E0(c, c_b0, c_b1, c_amp, D, smooth_param):
+    # Calculate penalties efficiently
+    prior_res = np.sqrt(smooth_param) * (D @ c)
+    prior_res_b0 = np.sqrt(smooth_param * 0.1) * (D @ c_b0)
+    prior_res_b1 = np.sqrt(smooth_param * 0.1) * (D @ c_b1)
+    prior_res_amp = np.sqrt(smooth_param * 0.1) * (D @ c_amp)
+    return prior_res, prior_res_b0, prior_res_b1, prior_res_amp
+
+
+class BSplinePoissonModel1D_numba_globalE0(BSplinePoissonModel1D_numba):
+    """
+    Numba-accelerated model with a single global Holtsmark E0 parameter 
+    (no spatial variation for the microfield).
+    """
+    def setup_params(self, base_params: Parameters) -> Parameters:
+        params = super().setup_params(base_params)
+        
+        # Remove spatially varying c_E0_i parameters
+        for i in range(self.n_splines):
+            if f'c_E0_{i}' in params:
+                params.pop(f'c_E0_{i}')
+                
+        # Add a single global E0 parameter
+        mean_E0 = np.mean(self.E0_vec_init)
+        params.add('E0', value=mean_E0, min=1e-20, max=5.0, vary=False)
+        
+        return params
+
+    def forward_physics(self, params, coeffs=None):
+        if coeffs is None:
+            c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
+            c_b0 = np.array([params[f'c_b0_{i}'].value for i in range(self.n_splines)])
+            c_b1 = np.array([params[f'c_b1_{i}'].value for i in range(self.n_splines)])
+            c_amp = np.array([params[f'c_amp_{i}'].value for i in range(self.n_splines)])
+            E0_val = params['E0'].value
+        else:
+            c, E0_val, c_b0, c_b1, c_amp = coeffs
+
+        # Evaluate vectors using optimized Numba
+        phi_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec = _bspline_eval_vectors_numba_global_E0(
+            c, c_b0, c_b1, c_amp, self.B, self.B_d1, self.B_d2
+        )
+        E0_vec = np.full_like(self.x, E0_val)
+        
+        fshift = params['fshift'].value if 'fshift' in params else 0.0
+        f_shifted = self.f - fshift
+
+        S_pred = self.signal_sim.holtsmark_spectrum(
+            f_shifted, params, efield=E_vec, grad_vec=grad_vec, E0=E0_vec, amp=1.0)
+        
+        # Parallelly apply background offsets and spatial amplitudes 
+        S_pred = _apply_bg_numba(S_pred, amp_vec, b0_vec, b1_vec, f_shifted)
+
+        if S_pred.shape != self.data.shape and S_pred.T.shape == self.data.shape:
+            S_pred = S_pred.T
+            
+        return S_pred, E_vec, grad_vec, phi_vec, E0_vec
+
+    def residuals(self, params: Parameters, freq: NDArray, data: NDArray, data_err: NDArray|None = None) -> NDArray:
+        c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
+        c_b0 = np.array([params[f'c_b0_{i}'].value for i in range(self.n_splines)])
+        c_b1 = np.array([params[f'c_b1_{i}'].value for i in range(self.n_splines)])
+        c_amp = np.array([params[f'c_amp_{i}'].value for i in range(self.n_splines)])
+        E0_val = params['E0'].value
+        
+        coeffs = (c, E0_val, c_b0, c_b1, c_amp)
+        S_pred, E_vec, _, phi_vec, E0_vec = self.forward_physics(params, coeffs=coeffs)
+
+        data_norm = data / self.data_max
+        difference = data_norm - S_pred
+        
+        if data_err is None:
+            data_res = difference.flatten()
+        else:
+            data_err_norm = data_err / self.data_max
+            data_res = (difference / data_err_norm).flatten()
+            
+        # Extracted spline smoothing penalties calculated in Numba
+        prior_res, prior_res_b0, prior_res_b1, prior_res_amp = _calc_prior_res_numba_global_E0(
+            c, c_b0, c_b1, c_amp, self.D, self.smooth_param
+        )
+        
+        return np.concatenate([data_res, prior_res, prior_res_b0, prior_res_b1, prior_res_amp])
+
+
+
+
+
+
+
+#------------------------LOWER RESOLUTION BACKGROUND---------------------------
+@njit(fastmath=True, cache=True)
+def _bspline_eval_vectors_numba_split_basis(c, c_b0, c_b1, c_amp, B, B_d1, B_d2, B_bg):
+    # Fast BLAS matrix multiplications
+    phi_vec = B @ c
+    E_vec = -(B_d1 @ c) * 10.0
+    grad_vec = -(B_d2 @ c) * 10.0
+    b0_vec = B_bg @ c_b0
+    b1_vec = B_bg @ c_b1
+    amp_vec = B_bg @ c_amp
+    return phi_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec
+
+
+@njit(fastmath=True, cache=True)
+def _calc_prior_res_numba_split_basis(c, c_b0, c_b1, c_amp, D, D_bg, smooth_param, smooth_param_bg):
+    # Calculate penalties efficiently
+    prior_res = np.sqrt(smooth_param) * (D @ c)
+    prior_res_b0 = np.sqrt(smooth_param_bg * 0.1) * (D_bg @ c_b0)
+    prior_res_b1 = np.sqrt(smooth_param_bg * 0.1) * (D_bg @ c_b1)
+    prior_res_amp = np.sqrt(smooth_param_bg * 0.1) * (D_bg @ c_amp)
+    return prior_res, prior_res_b0, prior_res_b1, prior_res_amp
+
+
+class BSplinePoissonModel1D_numba_globalE0_splitBg(BSplinePoissonModel1D_numba_globalE0):
+    """
+    Subclass that uses a decoupled (and typically smaller) number of B-spline 
+    coefficients for background drifts and amplitude (b0, b1, amp) compared 
+    to the main potential (phi) splines. This prevents overfitting the background
+    while preserving high spatial resolution for the Electric field.
+    """
+    def __init__(self, 
+                 data: SpectralData, 
+                 field_ref: FieldReference, 
+                 signal_sim: GPPoissonSignalSimulator1D, 
+                 E_vec_init: NDArray, 
+                 E0_vec_init: NDArray|None = None, 
+                 n_splines: int = 32, 
+                 n_splines_bg: int = 10,
+                 spline_degree: int = 3,
+                 smooth_param: float = 1e4, 
+                 smooth_param_E0: float = 1e4, 
+                 smooth_param_bg: float = 1.0,
+                 zero_bnd_efield: bool = True):
+        
+        super().__init__(data, field_ref, signal_sim, E_vec_init, E0_vec_init, 
+                         n_splines, spline_degree, smooth_param, smooth_param_E0, 
+                         zero_bnd_efield)
+        
+        self.n_splines_bg = n_splines_bg
+        self.smooth_param_bg = smooth_param_bg
+        
+        if n_splines_bg <= self.k and n_splines_bg > 1:
+            raise ValueError("Number of background splines must be greater than spline degree or exactly 1.")
+            
+        # Handle single-coefficient case (flat spatial background) gracefully
+        if n_splines_bg == 1:
+            self.B_bg = np.ones((len(self.x), 1))
+            self.D_bg = np.zeros((1, 1))
+        else:
+            n_internal_knots_bg = n_splines_bg - self.k - 1
+            internal_knots_bg = np.linspace(self.x[0], self.x[-1], n_internal_knots_bg + 2)[1:-1]
+            self.knots_bg = np.concatenate(([self.x[0]] * (self.k + 1), internal_knots_bg, [self.x[-1]] * (self.k + 1)))
+
+            self.B_bg = np.zeros((len(self.x), n_splines_bg))
+            for i in range(n_splines_bg):
+                c_idx = np.zeros(n_splines_bg)
+                c_idx[i] = 1
+                spl = BSpline(self.knots_bg, c_idx, self.k, extrapolate=False)
+                self.B_bg[:, i] = spl(self.x)
+                
+            if self.n_splines_bg >= 4:
+                self.D_bg = diags([-1.0, 3.0, -3.0, 1.0], [0, 1, 2, 3], shape=(self.n_splines_bg - 3, self.n_splines_bg)).toarray()
+            elif self.n_splines_bg >= 3:
+                self.D_bg = diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(self.n_splines_bg - 2, self.n_splines_bg)).toarray()
+            else:
+                self.D_bg = diags([-1.0, 1.0], [0, 1], shape=(self.n_splines_bg - 1, self.n_splines_bg)).toarray()
+
+    def setup_params(self, base_params: Parameters) -> Parameters:
+        params = super().setup_params(base_params)
+        
+        # Remove parent's background splines (they were populated up to self.n_splines)
+        for i in range(self.n_splines):
+            if f'c_b0_{i}' in params: params.pop(f'c_b0_{i}')
+            if f'c_b1_{i}' in params: params.pop(f'c_b1_{i}')
+            if f'c_amp_{i}' in params: params.pop(f'c_amp_{i}')
+            
+        init_amp = params['amp'].value if 'amp' in params else 100.0
+        for i in range(self.n_splines_bg):
+            params.add(f'c_b0_{i}', value=1e-4)
+            params.add(f'c_b1_{i}', value=1e-4)
+            params.add(f'c_amp_{i}', value=init_amp, min=0.0)
+            
+        return params
+
+    def forward_physics(self, params, coeffs=None):
+        if coeffs is None:
+            c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
+            c_b0 = np.array([params[f'c_b0_{i}'].value for i in range(self.n_splines_bg)])
+            c_b1 = np.array([params[f'c_b1_{i}'].value for i in range(self.n_splines_bg)])
+            c_amp = np.array([params[f'c_amp_{i}'].value for i in range(self.n_splines_bg)])
+            E0_val = params['E0'].value
+        else:
+            c, E0_val, c_b0, c_b1, c_amp = coeffs
+
+        phi_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec = _bspline_eval_vectors_numba_split_basis(
+            c, c_b0, c_b1, c_amp, self.B, self.B_d1, self.B_d2, self.B_bg
+        )
+        E0_vec = np.full_like(self.x, E0_val)
+        
+        fshift = params['fshift'].value if 'fshift' in params else 0.0
+        f_shifted = self.f - fshift
+
+        S_pred = self.signal_sim.holtsmark_spectrum(
+            f_shifted, params, efield=E_vec, grad_vec=grad_vec, E0=E0_vec, amp=1.0)
+        
+        S_pred = _apply_bg_numba(S_pred, amp_vec, b0_vec, b1_vec, f_shifted)
+
+        if S_pred.shape != self.data.shape and S_pred.T.shape == self.data.shape:
+            S_pred = S_pred.T
+            
+        return S_pred, E_vec, grad_vec, phi_vec, E0_vec
+
+    def residuals(self, params: Parameters, freq: NDArray, data: NDArray, data_err: NDArray|None = None) -> NDArray:
+        c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
+        c_b0 = np.array([params[f'c_b0_{i}'].value for i in range(self.n_splines_bg)])
+        c_b1 = np.array([params[f'c_b1_{i}'].value for i in range(self.n_splines_bg)])
+        c_amp = np.array([params[f'c_amp_{i}'].value for i in range(self.n_splines_bg)])
+        E0_val = params['E0'].value
+        
+        coeffs = (c, E0_val, c_b0, c_b1, c_amp)
+        S_pred, E_vec, _, phi_vec, E0_vec = self.forward_physics(params, coeffs=coeffs)
+
+        data_norm = data / self.data_max
+        difference = data_norm - S_pred
+        
+        if data_err is None:
+            data_res = difference.flatten()
+        else:
+            data_err_norm = data_err / self.data_max
+            data_res = (difference / data_err_norm).flatten()
+            
+        prior_res, prior_res_b0, prior_res_b1, prior_res_amp = _calc_prior_res_numba_split_basis(
+            c, c_b0, c_b1, c_amp, self.D, self.D_bg, self.smooth_param, self.smooth_param_bg
+        )
+        
+        return np.concatenate([data_res, prior_res, prior_res_b0, prior_res_b1, prior_res_amp])
