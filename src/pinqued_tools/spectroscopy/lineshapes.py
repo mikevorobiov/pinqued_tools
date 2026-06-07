@@ -361,12 +361,8 @@ class HoltsmarkLine(BaseSpectralLine):
         prob = np.empty_like(Etot_grid)
         valid = Etot_grid >= 0  # this E field magnitude distribution
         prob[~valid] = np.nan
-<<<<<<< HEAD
         E0 = max(E0, 1e-1)
         
-=======
-        E0 = max(E0, 1e-4)
->>>>>>> d23b73bd0d94e69ccd928fde098c579febe63a95
         if efield < 1e-6:
             betas = Etot_grid / E0
             prob[valid] = np.interp(betas[valid], self._dense_betas, self._dense_h_vals, left=0.0, right=0.0)
