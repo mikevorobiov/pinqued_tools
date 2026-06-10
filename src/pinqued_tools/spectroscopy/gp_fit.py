@@ -50,6 +50,10 @@ class GPPoissonModel1D():
         self.data = spectra / self.data_max
         self.px_size = np.abs(self.x[1] - self.x[0]) # Pixel size
         
+        # Empirically estimate the standard deviation of the noise in the normalized data
+        self.noise_sigma = np.std(np.diff(self.data, axis=-1)) / np.sqrt(2.0)
+        if self.noise_sigma < 1e-8: self.noise_sigma = 1.0
+        
         # 1. Bake in Poisson Logic: GP Prior on Potential phi(x)
         # We use a Matern 5/2 kernel because it is twice differentiable.
         self.K_phi = self._matern_kernel(self.x, self.x, l, sigma_f)
@@ -118,6 +122,47 @@ class GPPoissonModel1D():
             
         return S_pred, E_vec, grad_vec, phi_vec
 
+    def calc_uncertainty_bands(self, fit_result, n_samples=200, random_state=None):
+        """
+        Estimates the uncertainty bands (1-sigma standard deviation) for the physical 
+        vectors by Monte Carlo sampling the parameter covariance matrix.
+        """
+        if getattr(fit_result, 'covar', None) is None:
+            raise ValueError("Fit result does not contain a covariance matrix. "
+                             "Uncertainties cannot be estimated.")
+                             
+        rng = np.random.default_rng(random_state)
+        var_names = fit_result.var_names
+        best_vals = np.array([fit_result.params[name].value for name in var_names])
+        
+        # Sample parameter space from the multivariate normal posterior
+        samples = rng.multivariate_normal(best_vals, fit_result.covar, size=n_samples)
+        covar = np.array(fit_result.covar)
+        # 1. Force perfectly symmetric
+        covar = (covar + covar.T) / 2.0
+        # 2. Push any slightly negative eigenvalues safely above zero
+        min_eig = np.min(np.linalg.eigvalsh(covar))
+        if min_eig < 0:
+            covar -= np.eye(covar.shape[0]) * (min_eig - 1e-12)
+            
+        # Sample parameter space using robust Singular Value Decomposition
+        samples = rng.multivariate_normal(best_vals, covar, size=n_samples, method='svd')
+        
+        E_samples = np.zeros((n_samples, len(self.x)))
+        p_copy = fit_result.params.copy()
+        
+        for i, sample in enumerate(samples):
+            for name, val in zip(var_names, sample):
+                param = p_copy[name]
+                if val < param.min: val = param.min
+                if val > param.max: val = param.max
+                param.value = val
+                
+            res = self.forward_physics(p_copy)
+            E_samples[i] = res[1] # E_vec is consistently the 2nd return element
+            
+        return np.std(E_samples, axis=0)
+
     def residuals(self, 
                   params: Parameters,
                   freq: NDArray, 
@@ -131,7 +176,8 @@ class GPPoissonModel1D():
         difference = data_norm - S_pred
         
         if data_err is None:
-            data_res = difference.flatten()
+            # Weight residuals strictly by the empirical noise standard deviation
+            data_res = (difference / self.noise_sigma).flatten()
         else:
             data_err_norm = data_err / self.data_max
             data_res = (difference / data_err_norm).flatten()
@@ -202,6 +248,10 @@ class BSplinePoissonModel1D():
         self.data_max = np.max(spectra) # Use a single global max for normalization
         self.data = spectra / self.data_max
         self.px_size = np.abs(self.x[1] - self.x[0]) # Pixel size
+        
+        # Empirically estimate the standard deviation of the noise in the normalized data
+        self.noise_sigma = np.std(np.diff(self.data, axis=-1)) / np.sqrt(2.0)
+        if self.noise_sigma < 1e-8: self.noise_sigma = 1.0
         
         # 1. Bake in P-Spline Logic: Penalized B-Spline Prior on Potential phi(x)
         self.k = spline_degree
@@ -274,7 +324,7 @@ class BSplinePoissonModel1D():
         # This allows for more flexible fitting while still guaranteeing physical plausibility.
         # Enforce monotonically decreasing potential phi(x) by constraining B-spline 
         # coefficients. This strictly guarantees Electric Field >= 0 everywhere.
-        params.add(f'c_{self.n_splines - 1}', value=0.0)
+        params.add(f'c_{self.n_splines - 1}', value=0.0, vary=False)
         for i in range(self.n_splines - 2, -1, -1):
             delta_init = c_init[i] - c_init[i+1]
             params.add(f'delta_c_{i}', value=delta_init)
@@ -329,6 +379,48 @@ class BSplinePoissonModel1D():
             
         return S_pred, E_vec, grad_vec, phi_vec, E0_vec
 
+    def calc_uncertainty_bands(self, fit_result, n_samples=200, random_state=None):
+        """
+        Estimates the uncertainty bands (1-sigma standard deviation) for the physical 
+        vectors by Monte Carlo sampling the parameter covariance matrix.
+        """
+        if getattr(fit_result, 'covar', None) is None:
+            raise ValueError("Fit result does not contain a covariance matrix. "
+                             "Uncertainties cannot be estimated.")
+                             
+        rng = np.random.default_rng(random_state)
+        var_names = fit_result.var_names
+        best_vals = np.array([fit_result.params[name].value for name in var_names])
+        
+        # Sample parameter space from the multivariate normal posterior
+        samples = rng.multivariate_normal(best_vals, fit_result.covar, size=n_samples)
+        covar = np.array(fit_result.covar)
+        # 1. Force perfectly symmetric
+        covar = (covar + covar.T) / 2.0
+        # 2. Push any slightly negative eigenvalues safely above zero
+        min_eig = np.min(np.linalg.eigvalsh(covar))
+        if min_eig < 0:
+            covar -= np.eye(covar.shape[0]) * (min_eig - 1e-12)
+            
+        # Sample parameter space using robust Singular Value Decomposition
+        samples = rng.multivariate_normal(best_vals, covar, size=n_samples, method='svd')
+        
+        E_samples = np.zeros((n_samples, len(self.x)))
+        p_copy = fit_result.params.copy()
+        
+        for i, sample in enumerate(samples):
+            for name, val in zip(var_names, sample):
+                param = p_copy[name]
+                # Safely enforce existing parameter bounds (e.g., E0 > 0)
+                if val < param.min: val = param.min
+                if val > param.max: val = param.max
+                param.value = val
+                
+            res = self.forward_physics(p_copy)
+            E_samples[i] = res[1] # E_vec is consistently the 2nd return element
+            
+        return np.std(E_samples, axis=0)
+
     def residuals(self, 
                   params: Parameters,
                   freq: NDArray, 
@@ -357,7 +449,8 @@ class BSplinePoissonModel1D():
         difference = data_norm - S_pred
         
         if data_err is None:
-            data_res = difference.flatten()
+            # Weight residuals strictly by the empirical noise standard deviation
+            data_res = (difference / self.noise_sigma).flatten()
         else:
             data_err_norm = data_err / self.data_max
             data_res = (difference / data_err_norm).flatten()
@@ -402,6 +495,17 @@ def _apply_bg_numba(S_pred, amp_vec, b0_vec, b1_vec, f_shifted):
     for i in prange(S_pred.shape[0]):
         for j in range(S_pred.shape[1]):
             out[i, j] = S_pred[i, j] * amp_vec[i] + b0_vec[i] * f_shifted[j] + b1_vec[i]
+    return out
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _apply_global_bg_numba(S_pred, amp, b0, b1, f_shifted):
+    """
+    Applies purely scalar background and amplitude parameters to the 2D spectrum.
+    """
+    out = np.empty_like(S_pred)
+    for i in prange(S_pred.shape[0]):
+        for j in range(S_pred.shape[1]):
+            out[i, j] = S_pred[i, j] * amp + b0 * f_shifted[j] + b1
     return out
 
 @njit(fastmath=True, cache=True)
@@ -525,7 +629,7 @@ class BSplinePoissonModel1D_numba_globalE0(BSplinePoissonModel1D_numba):
         
         return params
 
-    def forward_physics(self, params, coeffs=None):
+    def forward_physics(self, params, coeffs=None, return_amp=False):
         if coeffs is None:
             c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
             c_b0 = np.array([params[f'c_b0_{i}'].value for i in range(self.n_splines)])
@@ -552,7 +656,9 @@ class BSplinePoissonModel1D_numba_globalE0(BSplinePoissonModel1D_numba):
 
         if S_pred.shape != self.data.shape and S_pred.T.shape == self.data.shape:
             S_pred = S_pred.T
-            
+        
+        if return_amp:
+            return S_pred, E_vec, grad_vec, phi_vec, E0_vec, amp_vec
         return S_pred, E_vec, grad_vec, phi_vec, E0_vec
 
     def residuals(self, params: Parameters, freq: NDArray, data: NDArray, data_err: NDArray|None = None) -> NDArray:
@@ -733,3 +839,73 @@ class BSplinePoissonModel1D_numba_globalE0_splitBg(BSplinePoissonModel1D_numba_g
         )
         
         return np.concatenate([data_res, prior_res, prior_res_b0, prior_res_b1, prior_res_amp])
+
+
+class BSplinePoissonModel1D_numba_globalE0_globalBg(BSplinePoissonModel1D_numba_globalE0):
+    """
+    Subclass that completely eliminates spatially varying background and 
+    amplitude parameters. It models the background as a global linear drift 
+    (b0, b1) and a single global amplitude scalar, drastically reducing parameter 
+    count and preventing spatial jitter overfitting.
+    """
+    def setup_params(self, base_params: Parameters) -> Parameters:
+        params = super().setup_params(base_params)
+        
+        # Remove all B-spline background and amplitude parameters inherited from parent
+        for i in range(self.n_splines):
+            if f'c_b0_{i}' in params: params.pop(f'c_b0_{i}')
+            if f'c_b1_{i}' in params: params.pop(f'c_b1_{i}')
+            if f'c_amp_{i}' in params: params.pop(f'c_amp_{i}')
+            
+        # Replace with single pure scalars
+        init_amp = params['amp'].value if 'amp' in params else 100.0
+        params.add('b0', value=1e-4)
+        params.add('b1', value=1e-4)
+        params.add('amp', value=init_amp, min=0.0)
+            
+        return params
+
+    def forward_physics(self, params, coeffs=None):
+        if coeffs is None:
+            c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
+            E0_val = params['E0'].value
+            b0 = params['b0'].value
+            b1 = params['b1'].value
+            amp = params['amp'].value
+        else:
+            c, E0_val, b0, b1, amp = coeffs
+
+        # Fast BLAS matrix multiplications for E-field only
+        phi_vec = self.B @ c
+        E_vec = -(self.B_d1 @ c) * 10.0
+        grad_vec = -(self.B_d2 @ c) * 10.0
+        E0_vec = np.full_like(self.x, E0_val)
+        
+        fshift = params['fshift'].value if 'fshift' in params else 0.0
+        f_shifted = self.f - fshift
+
+        S_pred = self.signal_sim.holtsmark_spectrum(
+            f_shifted, params, efield=E_vec, grad_vec=grad_vec, E0=E0_vec, amp=1.0)
+        
+        # Apply scalar background in Numba
+        S_pred = _apply_global_bg_numba(S_pred, amp, b0, b1, f_shifted)
+
+        if S_pred.shape != self.data.shape and S_pred.T.shape == self.data.shape:
+            S_pred = S_pred.T
+            
+        return S_pred, E_vec, grad_vec, phi_vec, E0_vec
+
+    def residuals(self, params: Parameters, freq: NDArray, data: NDArray, data_err: NDArray|None = None) -> NDArray:
+        # Extract parameters manually for the scalar case
+        c = np.array([params[f'c_{i}'].value for i in range(self.n_splines)])
+        coeffs = (c, params['E0'].value, params['b0'].value, params['b1'].value, params['amp'].value)
+        
+        S_pred, E_vec, _, phi_vec, E0_vec = self.forward_physics(params, coeffs=coeffs)
+        
+        difference = (data / self.data_max) - S_pred
+        data_res = difference.flatten() if data_err is None else (difference / (data_err / self.data_max)).flatten()
+            
+        # Only penalize the electric field curvature, leaving background entirely penalty-free
+        prior_res = np.sqrt(self.smooth_param) * (self.D @ c)
+        
+        return np.concatenate([data_res, prior_res])
