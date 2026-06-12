@@ -14,10 +14,66 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from lmfit import minimize, Parameters, fit_report
+from functools import lru_cache
+from numba import njit, prange
 
 from pinqued_tools.spectroscopy.spectrum import SpectralData, Axes0D
 from pinqued_tools.spectroscopy.lineshapes import HoltsmarkLine
 from pinqued_tools.spectroscopy.field_reference import FieldReference
+
+@lru_cache(maxsize=16)
+def get_hermgauss_quadrature(n_subsamples: int):
+    """
+    Caches the Gauss-Hermite quadrature points and weights.
+    Calling `np.polynomial.hermite.hermgauss` is computationally expensive inside optimization loops.
+    """
+    points, weights = np.polynomial.hermite.hermgauss(n_subsamples)
+    norm_weights = weights / np.sqrt(np.pi)
+    offsets = points * (1.0 / (2.0 * np.sqrt(np.log(2.0))))
+    return offsets, norm_weights
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _fast_variable_gaussian_filter1d(data: NDArray, sigmas: NDArray) -> NDArray:
+    """
+    Applies a 1D Gaussian blur across the frequency axis (axis 1) of a 2D array.
+    Supports a distinct, spatially-varying blur width (sigma) for each row.
+    """
+    out = np.zeros_like(data)
+    M = data.shape[0]
+    N = data.shape[1]
+    for i in prange(M):
+        sigma = sigmas[i]
+        if sigma < 1e-3:
+            for j in range(N):
+                out[i, j] = data[i, j]
+            continue
+        
+        # Build localized 4-sigma kernel
+        radius = int(np.ceil(4.0 * sigma))
+        kernel_size = 2 * radius + 1
+        kernel = np.zeros(kernel_size)
+        sum_k = 0.0
+        for k in range(kernel_size):
+            x = k - radius
+            val = np.exp(-0.5 * (x / sigma)**2)
+            kernel[k] = val
+            sum_k += val
+            
+        for k in range(kernel_size):
+            kernel[k] /= sum_k
+            
+        # Apply convolution with edge mirroring
+        for j in range(N):
+            val = 0.0
+            for k in range(kernel_size):
+                idx = j + k - radius
+                if idx < 0: idx = -idx
+                elif idx >= N: idx = 2 * N - 2 - idx
+                if idx < 0: idx = 0
+                if idx >= N: idx = N - 1
+                val += data[i, idx] * kernel[k]
+            out[i, j] = val
+    return out
 
 class SignalSimulator():
     '''
@@ -153,10 +209,20 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
     def __init__(self, 
                  reference: FieldReference,
                  px_size: float,
-                 lineshape_func: Callable|None = None
+                 lineshape_func: Callable|None = None,
+                 n_subsamples: int = 3
                  ):
         super().__init__(reference, lineshape_func)
         self.px_size = px_size
+        self.n_subsamples = n_subsamples
+
+    @property
+    def subsamples(self):
+        return self.n_subsamples
+
+    @subsamples.setter
+    def subsamples(self, value):
+        self.n_subsamples = value
 
     def holtsmark_spectrum(self, 
                            freq: NDArray, 
@@ -165,12 +231,12 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
                            grad_vec: float|None = None,
                            E0: float|None = None,
                            amp: float|None = None,
-                           n_subsamples: int = 20
                            ) -> NDArray:
         '''
         Simulate EIT signal for a given electric field using the Holtsmark lineshape.
         Can accept spatial arrays for efield and grad_vec to vectorize the calculation.
         '''
+        n_subsamples = self.n_subsamples
 
         scale_factor = params['amp'].value if amp is None else amp
         width = params['width'].value
@@ -178,9 +244,9 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
         grad_correct = params['grad_correct'].value if 'grad_correct' in params else 0.0
         if grad_vec is not None:
             # Transverse gradient modeled as proportional to local E-field
-            grad_val = np.sqrt(grad_vec**2 + (grad_correct * efield)**2)
+            delta_E = np.sqrt((grad_vec * self.px_size)**2 + (grad_correct * efield)**2)
         else:
-            grad_val = grad_correct * efield
+            delta_E = grad_correct * efield
 
         r_amp = [params[f'rel_amp_{i}'].value for i in range(len(self._hline_list))]
         
@@ -198,10 +264,11 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
                 # Map domain from [-1, 1] to [-0.5, 0.5] and normalize weights to sum to 1
                 offsets = points * 0.5
                 norm_weights = weights * 0.5
+
                 for offset, weight in zip(offsets, norm_weights):
                     # Ensure absolute efield to prevent negative LUT queries
                     # Fixed dimensionality bug: px_size instead of px_size**2
-                    efield_smear = np.abs(efield + (grad_val * self.px_size * offset))
+                    efield_smear = np.abs(efield + delta_E * offset)
                     hline_smeared += weight * hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
             else:
                 hline_smeared = hline(freq, efield=np.abs(efield), width=width, E0=E0, amplitude=ai, model='lut')
@@ -263,9 +330,9 @@ class GPPoissonSignalSimulator1D_widthGrid(GPPoissonSignalSimulator1D):
         grad_correct = params['grad_correct'].value if 'grad_correct' in params else 0.0
         if grad_vec is not None:
             # Transverse gradient modeled as proportional to local E-field
-            grad_val = np.sqrt(grad_vec**2 + (grad_correct * efield)**2)
+            delta_E = np.sqrt((grad_vec * self.px_size)**2 + (grad_correct * efield)**2)
         else:
-            grad_val = grad_correct * efield
+            delta_E = grad_correct * efield
 
         # Handle 1D (spatial) evaluation
         if efield is not None and np.ndim(efield) > 0:
@@ -281,20 +348,83 @@ class GPPoissonSignalSimulator1D_widthGrid(GPPoissonSignalSimulator1D):
         for i, (hline, ai) in enumerate(zip(self._hline_list, r_amp)):
             if n_subsamples > 1:
                 hline_smeared = 0.0
-                # Use Gauss-Legendre quadrature for highly accurate sub-pixel integration
-                points, weights = np.polynomial.legendre.leggauss(n_subsamples)
-                # Map domain from [-1, 1] to [-0.5, 0.5] and normalize weights to sum to 1
-                offsets = points * 0.5
-                norm_weights = weights * 0.5
+                # Use Gauss-Hermite quadrature for a Gaussian-weighted field distribution
+                points, weights = np.polynomial.hermite.hermgauss(n_subsamples)
+                # Normalize Hermite weights to sum to 1
+                norm_weights = weights / np.sqrt(np.pi)
+                # Map quadrature points assuming delta_E represents FWHM of field spread
+                offsets = points * (1.0 / (2.0 * np.sqrt(np.log(2.0))))
                 for offset, weight in zip(offsets, norm_weights):
                     # Ensure absolute efield to prevent negative LUT queries
-                    efield_smear = np.abs(efield + grad_val * self.px_size * offset)
+                    efield_smear = np.abs(efield + delta_E * offset)
                     hline_smeared += weight * hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
             else:
                 hline_smeared = hline(freq, efield=np.abs(efield), width=width, E0=E0, amplitude=ai, model='lut')
             spectrum += hline_smeared 
         spectrum *= scale_factor
         return spectrum
+
+
+class GPPoissonSignalSimulator1D_FreqSmear(GPPoissonSignalSimulator1D):
+    """
+    Implements Frequency-Domain Gaussian Filtering for extreme smearing scenarios.
+    Instead of calculating multiple E-field subsamples, the spectrum is evaluated
+    once at the local central field and then blurred along the frequency axis
+    using a variable-width Gaussian kernel.
+    """
+    def holtsmark_spectrum(self, 
+                           freq: NDArray, 
+                           params: Parameters,
+                           efield: float|NDArray|None = None,
+                           grad_vec: float|NDArray|None = None,
+                           E0: float|NDArray|None = None,
+                           amp: float|NDArray|None = None,
+                           ) -> NDArray:
+        
+        scale_factor = params['amp'].value if amp is None else amp
+        width = params['width'].value
+        
+        grad_correct = params['grad_correct'].value if 'grad_correct' in params else 0.0
+        efield_abs = np.abs(efield) if efield is not None else 0.0
+        
+        if grad_vec is not None:
+            delta_E = np.sqrt((grad_vec * self.px_size)**2 + (grad_correct * efield_abs)**2)
+        else:
+            delta_E = grad_correct * efield_abs
+
+        # Extract local Stark derivatives for each line to convert delta_E to delta_f
+        df_de_dict = self._reference.interp_dfdE(efield_abs)
+        df_de_list = list(df_de_dict.values())
+
+        r_amp = [params[f'rel_amp_{i}'].value for i in range(len(self._hline_list))]
+        
+        is_spatial = efield is not None and np.ndim(efield) > 0
+        if is_spatial:
+            spectrum = np.zeros((len(efield), len(freq)))
+        else:
+            spectrum = np.zeros_like(freq, dtype=np.float64)
+            
+        df_spacing = np.abs(freq[1] - freq[0])
+        
+        for i, (hline, ai) in enumerate(zip(self._hline_list, r_amp)):
+            # Evaluate pure un-smeared lineshape exactly once
+            hline_un_smeared = hline(freq, efield=efield_abs, width=width, E0=E0, amplitude=ai, model='lut')
+            
+            # Convert local E-field spread into a frequency-domain FWHM and pixel sigma
+            delta_f_FWHM = np.abs(df_de_list[i]) * delta_E
+            sigma_f = delta_f_FWHM / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+            sigma_px = sigma_f / df_spacing
+            
+            # Apply Numba-accelerated variable-width Gaussian blur
+            hline_2d = np.atleast_2d(hline_un_smeared)
+            sigmas_1d = np.atleast_1d(sigma_px)
+            hline_smeared = _fast_variable_gaussian_filter1d(hline_2d, sigmas_1d)
+            
+            spectrum += hline_smeared if is_spatial else hline_smeared.squeeze()
+                
+        spectrum *= scale_factor
+        return spectrum
+
 
 #%%
 if __name__=='__main__':
