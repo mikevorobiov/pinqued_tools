@@ -948,3 +948,46 @@ class BSplinePoissonModel1D_numba_globalE0_globalBg(BSplinePoissonModel1D_numba_
         prior_res = np.sqrt(self.smooth_param) * (self.D @ c) / scale_factor
         
         return np.concatenate([data_res, prior_res])
+
+
+class BSplinePoissonModel1D_numba_adaptive(BSplinePoissonModel1D_numba_globalE0):
+    """
+    Applies Spatially Adaptive Smoothing to the Electric Field.
+    The smoothing penalty is relaxed in regions of high Electric Field 
+    (where SNR is naturally lower) to allow the covariance matrix to capture
+    the true, larger physical uncertainty.
+    """
+    def __init__(self, *args, adapt_strength: float = 3.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # Reconstruct the initial E-field
+        E_init = -np.gradient(self.phi_vec_init, self.x) * 10.0
+        self.update_adaptive_weights(E_init, adapt_strength)
+
+    def update_adaptive_weights(self, E_current: NDArray, adapt_strength: float = 3.0):
+        """
+        Updates the smoothing matrix D based on a given Electric field array.
+        This can be called iteratively between fits to refine the adaptive penalty.
+        """
+        # 1. Map the rows of the difference matrix D to the spatial grid
+        M = self.D.shape[0]
+        x_indices = np.linspace(0, len(self.x) - 1, M).astype(int)
+        
+        # 2. Extract E-field at these spatial locations (using absolute values)
+        E_local = np.abs(E_current[x_indices])
+        E_max = np.max(E_local) if np.max(E_local) > 1e-6 else 1.0
+        
+        # 3. Calculate weights (exponential drop-off in high E-field regions)
+        # adapt_strength = 3.0 means the penalty drops to exp(-3) ~ 5% at E_max.
+        weights = np.exp(-adapt_strength * (E_local / E_max))
+        
+        # 4. Reconstruct base D matrix depending on spline count
+        if self.n_splines >= 4:
+            base_D = diags([-1.0, 3.0, -3.0, 1.0], [0, 1, 2, 3], shape=(self.n_splines - 3, self.n_splines)).toarray()
+        elif self.n_splines >= 3:
+            base_D = diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(self.n_splines - 2, self.n_splines)).toarray()
+        else:
+            base_D = diags([-1.0, 1.0], [0, 1], shape=(self.n_splines - 1, self.n_splines)).toarray()
+            
+        # 5. Multiply each row of the standard base D matrix by its spatial weight
+        self.D = weights[:, np.newaxis] * base_D
