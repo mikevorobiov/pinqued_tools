@@ -53,6 +53,12 @@ class GPPoissonModel1D():
         # Empirically estimate the standard deviation of the noise in the normalized data
         self.noise_sigma = np.std(np.diff(self.data, axis=-1)) / np.sqrt(2.0)
         if self.noise_sigma < 1e-8: self.noise_sigma = 1.0
+        # Estimate the standard deviation of the noise in the normalized data
+        if getattr(data, 'signal_err', None) is not None:
+            self.noise_sigma = np.mean(data.signal_err / self.data_max)
+        else:
+            self.noise_sigma = np.std(np.diff(self.data, axis=-1)) / np.sqrt(2.0)
+            if self.noise_sigma < 1e-8: self.noise_sigma = 1.0
         
         # 1. Bake in Poisson Logic: GP Prior on Potential phi(x)
         # We use a Matern 5/2 kernel because it is twice differentiable.
@@ -135,15 +141,14 @@ class GPPoissonModel1D():
         var_names = fit_result.var_names
         best_vals = np.array([fit_result.params[name].value for name in var_names])
         
-        # Sample parameter space from the multivariate normal posterior
-        samples = rng.multivariate_normal(best_vals, fit_result.covar, size=n_samples)
         covar = np.array(fit_result.covar)
         # 1. Force perfectly symmetric
         covar = (covar + covar.T) / 2.0
-        # 2. Push any slightly negative eigenvalues safely above zero
-        min_eig = np.min(np.linalg.eigvalsh(covar))
-        if min_eig < 0:
-            covar -= np.eye(covar.shape[0]) * (min_eig - 1e-12)
+        # 2. Clip negative eigenvalues to zero to strictly preserve parameter smoothness correlations
+        eigvals, eigvecs = np.linalg.eigh(covar)
+        if np.any(eigvals < 0):
+            eigvals[eigvals < 0] = 0.0
+            covar = eigvecs @ np.diag(eigvals) @ eigvecs.T
             
         # Sample parameter space using robust Singular Value Decomposition
         samples = rng.multivariate_normal(best_vals, covar, size=n_samples, method='svd')
@@ -178,19 +183,22 @@ class GPPoissonModel1D():
         if data_err is None:
             # Weight residuals strictly by the empirical noise standard deviation
             data_res = (difference / self.noise_sigma).flatten()
+            scale_factor = self.noise_sigma
+            data_res = (difference / scale_factor).flatten()
         else:
             data_err_norm = data_err / self.data_max
+            scale_factor = np.mean(data_err_norm)
             data_res = (difference / data_err_norm).flatten()
             
-        # Include GP smoothness penalty as "prior residuals"
-        prior_res = self.L_inv @ phi_vec
+        # Include GP smoothness penalty as "prior residuals", scaled to preserve model shape
+        prior_res = (self.L_inv @ phi_vec) / scale_factor
 
         # Soft penalty to bound E-field without zeroing LM gradients
         max_E = np.max(self.field_ref.efield)
         overshoot = np.clip(E_vec - max_E, 0, None)
         undershoot = np.clip(-E_vec, 0, None)
         # Smooth quadratic penalty to prevent infinite Jacobian walls that break the optimizer
-        bounds_penalty = 1e4 * (overshoot**2 + undershoot**2)
+        bounds_penalty = (1e4 * (overshoot**2 + undershoot**2)) / scale_factor
         
         return np.concatenate([data_res, prior_res, bounds_penalty])
 
@@ -252,6 +260,12 @@ class BSplinePoissonModel1D():
         # Empirically estimate the standard deviation of the noise in the normalized data
         self.noise_sigma = np.std(np.diff(self.data, axis=-1)) / np.sqrt(2.0)
         if self.noise_sigma < 1e-8: self.noise_sigma = 1.0
+        # Estimate the standard deviation of the noise in the normalized data
+        if getattr(data, 'signal_err', None) is not None:
+            self.noise_sigma = np.mean(data.signal_err / self.data_max)
+        else:
+            self.noise_sigma = np.std(np.diff(self.data, axis=-1)) / np.sqrt(2.0)
+            if self.noise_sigma < 1e-8: self.noise_sigma = 1.0
         
         # 1. Bake in P-Spline Logic: Penalized B-Spline Prior on Potential phi(x)
         self.k = spline_degree
@@ -328,6 +342,7 @@ class BSplinePoissonModel1D():
         for i in range(self.n_splines - 2, -1, -1):
             delta_init = c_init[i] - c_init[i+1]
             params.add(f'delta_c_{i}', value=delta_init)
+            params.add(f'delta_c_{i}', value=max(0.0, delta_init), min=0.0)
             params.add(f'c_{i}', expr=f'c_{i+1} + delta_c_{i}')
             
         # Constrain E0 to a physical ceiling
@@ -392,15 +407,14 @@ class BSplinePoissonModel1D():
         var_names = fit_result.var_names
         best_vals = np.array([fit_result.params[name].value for name in var_names])
         
-        # Sample parameter space from the multivariate normal posterior
-        samples = rng.multivariate_normal(best_vals, fit_result.covar, size=n_samples)
         covar = np.array(fit_result.covar)
         # 1. Force perfectly symmetric
         covar = (covar + covar.T) / 2.0
-        # 2. Push any slightly negative eigenvalues safely above zero
-        min_eig = np.min(np.linalg.eigvalsh(covar))
-        if min_eig < 0:
-            covar -= np.eye(covar.shape[0]) * (min_eig - 1e-12)
+        # 2. Clip negative eigenvalues to zero to strictly preserve parameter smoothness correlations
+        eigvals, eigvecs = np.linalg.eigh(covar)
+        if np.any(eigvals < 0):
+            eigvals[eigvals < 0] = 0.0
+            covar = eigvecs @ np.diag(eigvals) @ eigvecs.T
             
         # Sample parameter space using robust Singular Value Decomposition
         samples = rng.multivariate_normal(best_vals, covar, size=n_samples, method='svd')
@@ -451,26 +465,21 @@ class BSplinePoissonModel1D():
         if data_err is None:
             # Weight residuals strictly by the empirical noise standard deviation
             data_res = (difference / self.noise_sigma).flatten()
+            scale_factor = self.noise_sigma
+            data_res = (difference / scale_factor).flatten()
         else:
             data_err_norm = data_err / self.data_max
+            scale_factor = np.mean(data_err_norm)
             data_res = (difference / data_err_norm).flatten()
             
-        # Include P-spline smoothness penalty as "prior residuals"
-        prior_res = np.sqrt(self.smooth_param) * (self.D @ c)
-        prior_res_E0 = np.sqrt(self.smooth_param_E0) * (self.D @ c_E0)
-        # Small regularizing smoothing penalties for the background to keep it well-behaved
-        prior_res_b0 = np.sqrt(self.smooth_param * 0.1) * (self.D @ c_b0)
-        prior_res_b1 = np.sqrt(self.smooth_param * 0.1) * (self.D @ c_b1)
-        prior_res_amp = np.sqrt(self.smooth_param * 0.1) * (self.D @ c_amp)
+        # Include P-spline smoothness penalty as "prior residuals", scaled to preserve model shape
+        prior_res = np.sqrt(self.smooth_param) * (self.D @ c) / scale_factor
+        prior_res_E0 = np.sqrt(self.smooth_param_E0) * (self.D @ c_E0) / scale_factor
+        prior_res_b0 = np.sqrt(self.smooth_param * 0.1) * (self.D @ c_b0) / scale_factor
+        prior_res_b1 = np.sqrt(self.smooth_param * 0.1) * (self.D @ c_b1) / scale_factor
+        prior_res_amp = np.sqrt(self.smooth_param * 0.1) * (self.D @ c_amp) / scale_factor
         
-        # Soft penalty to bound E-field without zeroing LM gradients
-        # max_E = np.max(self.field_ref.efield)
-        # overshoot = np.clip(E_vec - max_E, 0, None)
-        # undershoot = np.clip(-E_vec, 0, None)
-        # Smooth quadratic penalty to prevent infinite Jacobian walls that break the optimizer
-        # bounds_penalty = 1e4 * (overshoot**2 + undershoot**2)
-        
-        return np.concatenate([data_res, prior_res, prior_res_E0, prior_res_b0, prior_res_b1, prior_res_amp])#, bounds_penalty])
+        return np.concatenate([data_res, prior_res, prior_res_E0, prior_res_b0, prior_res_b1, prior_res_amp])
 
 
 # ------------------- NUMBA ACCELERATED MODEL -------------------
@@ -573,8 +582,11 @@ class BSplinePoissonModel1D_numba(BSplinePoissonModel1D):
         
         if data_err is None:
             data_res = difference.flatten()
+            scale_factor = self.noise_sigma
+            data_res = (difference / scale_factor).flatten()
         else:
             data_err_norm = data_err / self.data_max
+            scale_factor = np.mean(data_err_norm)
             data_res = (difference / data_err_norm).flatten()
             
         # Extracted spline smoothing penalties calculated in Numba
@@ -582,7 +594,12 @@ class BSplinePoissonModel1D_numba(BSplinePoissonModel1D):
             c, c_E0, c_b0, c_b1, c_amp, self.D, self.smooth_param, self.smooth_param_E0
         )
         
-        return np.concatenate([data_res, prior_res, prior_res_E0, prior_res_b0, prior_res_b1, prior_res_amp])
+        return np.concatenate([data_res, 
+                               prior_res / scale_factor, 
+                               prior_res_E0 / scale_factor, 
+                               prior_res_b0 / scale_factor, 
+                               prior_res_b1 / scale_factor, 
+                               prior_res_amp / scale_factor])
 
 
 
@@ -676,8 +693,11 @@ class BSplinePoissonModel1D_numba_globalE0(BSplinePoissonModel1D_numba):
         
         if data_err is None:
             data_res = difference.flatten()
+            scale_factor = self.noise_sigma
+            data_res = (difference / scale_factor).flatten()
         else:
             data_err_norm = data_err / self.data_max
+            scale_factor = np.mean(data_err_norm)
             data_res = (difference / data_err_norm).flatten()
             
         # Extracted spline smoothing penalties calculated in Numba
@@ -685,7 +705,11 @@ class BSplinePoissonModel1D_numba_globalE0(BSplinePoissonModel1D_numba):
             c, c_b0, c_b1, c_amp, self.D, self.smooth_param
         )
         
-        return np.concatenate([data_res, prior_res, prior_res_b0, prior_res_b1, prior_res_amp])
+        return np.concatenate([data_res, 
+                               prior_res / scale_factor, 
+                               prior_res_b0 / scale_factor, 
+                               prior_res_b1 / scale_factor, 
+                               prior_res_amp / scale_factor])
 
 
 
@@ -830,15 +854,22 @@ class BSplinePoissonModel1D_numba_globalE0_splitBg(BSplinePoissonModel1D_numba_g
         
         if data_err is None:
             data_res = difference.flatten()
+            scale_factor = self.noise_sigma
+            data_res = (difference / scale_factor).flatten()
         else:
             data_err_norm = data_err / self.data_max
+            scale_factor = np.mean(data_err_norm)
             data_res = (difference / data_err_norm).flatten()
             
         prior_res, prior_res_b0, prior_res_b1, prior_res_amp = _calc_prior_res_numba_split_basis(
             c, c_b0, c_b1, c_amp, self.D, self.D_bg, self.smooth_param, self.smooth_param_bg
         )
         
-        return np.concatenate([data_res, prior_res, prior_res_b0, prior_res_b1, prior_res_amp])
+        return np.concatenate([data_res, 
+                               prior_res / scale_factor, 
+                               prior_res_b0 / scale_factor, 
+                               prior_res_b1 / scale_factor, 
+                               prior_res_amp / scale_factor])
 
 
 class BSplinePoissonModel1D_numba_globalE0_globalBg(BSplinePoissonModel1D_numba_globalE0):
@@ -905,7 +936,15 @@ class BSplinePoissonModel1D_numba_globalE0_globalBg(BSplinePoissonModel1D_numba_
         difference = (data / self.data_max) - S_pred
         data_res = difference.flatten() if data_err is None else (difference / (data_err / self.data_max)).flatten()
             
+        if data_err is None:
+            scale_factor = self.noise_sigma
+            data_res = (difference / scale_factor).flatten()
+        else:
+            data_err_norm = data_err / self.data_max
+            scale_factor = np.mean(data_err_norm)
+            data_res = (difference / data_err_norm).flatten()
+            
         # Only penalize the electric field curvature, leaving background entirely penalty-free
-        prior_res = np.sqrt(self.smooth_param) * (self.D @ c)
+        prior_res = np.sqrt(self.smooth_param) * (self.D @ c) / scale_factor
         
         return np.concatenate([data_res, prior_res])
