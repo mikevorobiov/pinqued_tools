@@ -174,7 +174,13 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
 
         scale_factor = params['amp'].value if amp is None else amp
         width = params['width'].value
+        
         grad_correct = params['grad_correct'].value if 'grad_correct' in params else 0.0
+        if grad_vec is not None:
+            # Transverse gradient modeled as proportional to local E-field
+            grad_val = np.sqrt(grad_vec**2 + (grad_correct * efield)**2)
+        else:
+            grad_val = grad_correct * efield
 
         r_amp = [params[f'rel_amp_{i}'].value for i in range(len(self._hline_list))]
         
@@ -187,13 +193,16 @@ class GPPoissonSignalSimulator1D(SignalSimulator):
         for i, (hline, ai) in enumerate(zip(self._hline_list, r_amp)):
             if n_subsamples > 1:
                 hline_smeared = 0.0
-                # Distribute subsamples evenly across the pixel from -0.5 to 0.5
-                offsets = np.linspace(-0.5, 0.5, n_subsamples)
-                for offset in offsets:
+                # Use Gauss-Legendre quadrature for accurate sub-pixel integration
+                points, weights = np.polynomial.legendre.leggauss(n_subsamples)
+                # Map domain from [-1, 1] to [-0.5, 0.5] and normalize weights to sum to 1
+                offsets = points * 0.5
+                norm_weights = weights * 0.5
+                for offset, weight in zip(offsets, norm_weights):
                     # Ensure absolute efield to prevent negative LUT queries
-                    efield_smear = np.abs(efield + (grad_correct * efield * self.px_size * offset))
-                    hline_smeared += hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
-                hline_smeared /= n_subsamples
+                    # Fixed dimensionality bug: px_size instead of px_size**2
+                    efield_smear = np.abs(efield + (grad_val * self.px_size * offset))
+                    hline_smeared += weight * hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
             else:
                 hline_smeared = hline(freq, efield=np.abs(efield), width=width, E0=E0, amplitude=ai, model='lut')
             spectrum += hline_smeared 
@@ -251,6 +260,13 @@ class GPPoissonSignalSimulator1D_widthGrid(GPPoissonSignalSimulator1D):
         '''
         scale_factor = params['amp'].value if amp is None else amp
 
+        grad_correct = params['grad_correct'].value if 'grad_correct' in params else 0.0
+        if grad_vec is not None:
+            # Transverse gradient modeled as proportional to local E-field
+            grad_val = np.sqrt(grad_vec**2 + (grad_correct * efield)**2)
+        else:
+            grad_val = grad_correct * efield
+
         # Handle 1D (spatial) evaluation
         if efield is not None and np.ndim(efield) > 0:
             nx = len(efield)
@@ -265,13 +281,15 @@ class GPPoissonSignalSimulator1D_widthGrid(GPPoissonSignalSimulator1D):
         for i, (hline, ai) in enumerate(zip(self._hline_list, r_amp)):
             if n_subsamples > 1:
                 hline_smeared = 0.0
-                # Distribute subsamples evenly across the pixel from -0.5 to 0.5
-                offsets = np.linspace(-0.5, 0.5, n_subsamples)
-                for offset in offsets:
+                # Use Gauss-Legendre quadrature for highly accurate sub-pixel integration
+                points, weights = np.polynomial.legendre.leggauss(n_subsamples)
+                # Map domain from [-1, 1] to [-0.5, 0.5] and normalize weights to sum to 1
+                offsets = points * 0.5
+                norm_weights = weights * 0.5
+                for offset, weight in zip(offsets, norm_weights):
                     # Ensure absolute efield to prevent negative LUT queries
-                    efield_smear = np.abs(efield + grad_vec * self.px_size * offset)
-                    hline_smeared += hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
-                hline_smeared /= n_subsamples
+                    efield_smear = np.abs(efield + grad_val * self.px_size * offset)
+                    hline_smeared += weight * hline(freq, efield=efield_smear, width=width, E0=E0, amplitude=ai, model='lut')
             else:
                 hline_smeared = hline(freq, efield=np.abs(efield), width=width, E0=E0, amplitude=ai, model='lut')
             spectrum += hline_smeared 
