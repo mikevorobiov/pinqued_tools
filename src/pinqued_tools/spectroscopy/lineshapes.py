@@ -144,6 +144,13 @@ def _fast_lorentzian_sum(freq: NDArray,
         
     return amplitude * spectrum
 
+@njit(parallel=True, fastmath=True, cache=True)
+def _fast_interp_2d(freq: NDArray, lut_freq: NDArray, lut_spectra: NDArray) -> NDArray:
+    spectra = np.zeros((lut_spectra.shape[0], freq.shape[0]), dtype=np.float64)
+    for i in prange(lut_spectra.shape[0]):
+        spectra[i, :] = np.interp(freq, lut_freq, lut_spectra[i, :])
+    return spectra
+
 @njit(fastmath=True)
 def _polyval(x: np.float64, coef: NDArray) -> np.float64:
     y = 0
@@ -499,9 +506,8 @@ class HoltsmarkLine(BaseSpectralLine):
             spectrum = np.interp(freq, self._lut_freq, lut_spectrum)
             return amplitude * spectrum
         
-        # Array parameters (spatial grid): return 2D array (spatial x frequency)
-        # Safely broadcast arrays before meshing
-        E0_b, efield_b, width_b, = np.broadcast_arrays(E0, efield, width)
+        # Array parameters (spatial grid): return N-D array (*spatial_shape, frequency)
+        E0_b, efield_b, width_b = np.broadcast_arrays(E0, efield, width)
         
         query_points = np.zeros((efield_b.size, 3))
         query_points[:, 0] = E0_b.ravel()
@@ -509,13 +515,15 @@ class HoltsmarkLine(BaseSpectralLine):
         query_points[:, 2] = width_b.ravel()
         
         lut_spectra = self._lut_interpolator(query_points)
-        # spectra = np.empty_like(lut_spectra)
-        spectra = np.zeros((lut_spectra.shape[0], freq.shape[0]))
-        for i in range(lut_spectra.shape[0]):
-            spectra[i] = np.interp(freq, self._lut_freq, lut_spectra[i,:])
+        
+        # Fast parallel interpolation using Numba
+        spectra = _fast_interp_2d(freq, self._lut_freq, lut_spectra)
+        
+        # Reshape to match the broadcasted spatial dimensions + frequency axis
+        spectra = spectra.reshape(efield_b.shape + (freq.shape[0],))
 
         if np.ndim(amplitude) > 0:
-            amplitude = amplitude[:, np.newaxis]
+            amplitude = np.asarray(amplitude)[..., np.newaxis]
             
         return amplitude * spectra
 
