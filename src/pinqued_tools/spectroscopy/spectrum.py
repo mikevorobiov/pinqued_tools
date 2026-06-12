@@ -179,9 +179,9 @@ class SpectralDataProcessor():
         # Propagate error when the signal samples are binned
         n = array.shape[0]
         arr_reshaped = array.reshape(n // px_per_bin, px_per_bin, *array.shape[1:])
-        # Claculate error of the binned signal as
-        #  σ = √ {1/N ∑σ^2 } 
-        signal_error = np.sqrt(np.sum(arr_reshaped**2, axis=1) / px_per_bin)
+        # Calculate error of the binned signal (standard error of the mean) as
+        #  σ = 1/N * √ { ∑σ^2 } 
+        signal_error = np.sqrt(np.sum(arr_reshaped**2, axis=1)) / px_per_bin
         return signal_error
 
     def bin(self,
