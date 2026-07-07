@@ -47,6 +47,14 @@ class DataFitter():
         self._data = data
         self._model = model
     
+    @property
+    def data(self):
+        return self._data
+    
+    @property
+    def model(self):
+        return self._model
+    
     def set_data(self, data: SpectralData):
         self._data = data
 
