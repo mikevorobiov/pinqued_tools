@@ -361,26 +361,60 @@ class HoltsmarkLine(BaseSpectralLine):
 
         self._lut_interpolator = None
 
+    def _C_of_u(self, u: NDArray) -> NDArray:
+        """
+        Evaluate C(u) = integral_0^u H(beta)/beta dbeta.
+
+        Within the tabulated range, use the precomputed cumulative-trapezoid
+        table (self._dense_betas, self._C_u_vals). Beyond the tabulated max,
+        DO NOT clamp to a constant -- extrapolate analytically using the same
+        Holtsmark power-law tail (H(beta) ~ A * beta**-p, A=1.496, p=2.5)
+        already used to extend H itself past beta=20. The integral of that
+        tail from the tabulated edge to u has a simple closed form:
+
+            integral_{u0}^{u} A * beta**(-p-1) dbeta
+                = (A/p) * (u0**-p - u**-p)
+
+        This keeps C(u) - and hence C_max - C_min in _get_P_Etot - correctly
+        nonzero for arbitrarily large u, instead of collapsing to exactly zero
+        once both u_max and u_min exceed the tabulated grid (which is what was
+        silently truncating the long Holtsmark tail).
+        """
+        u = np.asarray(u, dtype=np.float64)
+        u_tab_max = self._dense_betas[-1]
+        C_tab_max = self._C_u_vals[-1]
+
+        C = np.interp(u, self._dense_betas, self._C_u_vals, left=0.0, right=C_tab_max)
+
+        beyond = u > u_tab_max
+        if np.any(beyond):
+            A, p = 1.496, 2.5
+            u_safe = np.where(beyond, u, u_tab_max)  # keep the power safe for the untouched entries
+            tail_extension = C_tab_max + (A / p) * (u_tab_max**(-p) - u_safe**(-p))
+            C = np.where(beyond, tail_extension, C)
+
+        return C
+
     def _get_P_Etot(self, Etot_grid: NDArray, efield: float, E0: float) -> NDArray:
         """Exact analytical 1D projection of the 2D macroscopic + microfield sum."""
         assert efield >= 0
         assert E0 >= 0
         prob = np.empty_like(Etot_grid)
-        valid = Etot_grid >= 0  # this E field magnitude distribution
+        valid = Etot_grid >= 0
         prob[~valid] = np.nan
         E0 = max(E0, 1e-1)
-        
+    
         if efield < 1e-6:
             betas = Etot_grid / E0
             prob[valid] = np.interp(betas[valid], self._dense_betas, self._dense_h_vals, left=0.0, right=0.0)
             return (1.0 / E0) * prob
-
+    
         u_max = (Etot_grid[valid] + efield) / E0
         u_min = np.abs(Etot_grid[valid] - efield) / E0
-
-        C_max = np.interp(u_max, self._dense_betas, self._C_u_vals, left=0.0, right=self._C_u_vals[-1])
-        C_min = np.interp(u_min, self._dense_betas, self._C_u_vals, left=0.0, right=self._C_u_vals[-1])
-
+    
+        C_max = self._C_of_u(u_max)   # was: np.interp(u_max, ..., right=self._C_u_vals[-1])
+        C_min = self._C_of_u(u_min)   # was: np.interp(u_min, ..., right=self._C_u_vals[-1])
+    
         prob[valid] = (Etot_grid[valid] / (2.0 * efield * E0)) * (C_max - C_min)
         return prob
 
