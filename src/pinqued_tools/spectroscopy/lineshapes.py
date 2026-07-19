@@ -144,7 +144,7 @@ def _fast_lorentzian_sum(freq: NDArray,
         
     return amplitude * spectrum
 
-@njit(parallel=True, fastmath=True, cache=True)
+@njit(parallel=True, fastmath=True, cache=False)
 def _fast_interp_2d(freq: NDArray, lut_freq: NDArray, lut_spectra: NDArray) -> NDArray:
     spectra = np.zeros((lut_spectra.shape[0], freq.shape[0]), dtype=np.float64)
     for i in prange(lut_spectra.shape[0]):

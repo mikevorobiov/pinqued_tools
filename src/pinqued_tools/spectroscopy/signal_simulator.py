@@ -32,7 +32,7 @@ def get_hermgauss_quadrature(n_subsamples: int):
     offsets = points * (1.0 / (2.0 * np.sqrt(np.log(2.0))))
     return offsets, norm_weights
 
-@njit(parallel=True, fastmath=True, cache=True)
+@njit(parallel=True, fastmath=True, cache=False)
 def _fast_variable_gaussian_filter1d(data: NDArray, sigmas: NDArray) -> NDArray:
     """
     Applies a 1D Gaussian blur across the frequency axis (axis 1) of a 2D array.

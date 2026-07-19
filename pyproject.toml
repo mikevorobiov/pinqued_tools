@@ -36,7 +36,8 @@ dependencies = [
     "lmfit",
     "pytest",
     "pybaselines",
-    "numba"
+    "numba",
+    "tbb"
 ]
 
 [project.urls]

@@ -484,7 +484,7 @@ class BSplinePoissonModel1D():
 
 # ------------------- NUMBA ACCELERATED MODEL -------------------
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=False)
 def _bspline_eval_vectors_numba(c, c_E0, c_b0, c_b1, c_amp, B, B_d1, B_d2):
 
     # Fast BLAS matrix multiplications
@@ -497,7 +497,7 @@ def _bspline_eval_vectors_numba(c, c_E0, c_b0, c_b1, c_amp, B, B_d1, B_d2):
     amp_vec = B @ c_amp
     return phi_vec, E0_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec
 
-@njit(parallel=True, fastmath=True, cache=True)
+@njit(parallel=True, fastmath=True, cache=False)
 def _apply_bg_numba(S_pred, amp_vec, b0_vec, b1_vec, f_shifted):
     # Bypasses intermediate large memory allocations typical of NumPy broadcasting
     out = np.empty_like(S_pred)
@@ -506,7 +506,7 @@ def _apply_bg_numba(S_pred, amp_vec, b0_vec, b1_vec, f_shifted):
             out[i, j] = S_pred[i, j] * amp_vec[i] + b0_vec[i] * f_shifted[j] + b1_vec[i]
     return out
 
-@njit(parallel=True, fastmath=True, cache=True)
+@njit(parallel=True, fastmath=True, cache=False)
 def _apply_global_bg_numba(S_pred, amp, b0, b1, f_shifted):
     """
     Applies purely scalar background and amplitude parameters to the 2D spectrum.
@@ -517,7 +517,7 @@ def _apply_global_bg_numba(S_pred, amp, b0, b1, f_shifted):
             out[i, j] = S_pred[i, j] * amp + b0 * f_shifted[j] + b1
     return out
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=False)
 def _calc_prior_res_numba(c, c_E0, c_b0, c_b1, c_amp, D, smooth_param, smooth_param_E0):
     # Calculate penalties efficiently
     prior_res = np.sqrt(smooth_param) * (D @ c)
@@ -605,7 +605,7 @@ class BSplinePoissonModel1D_numba(BSplinePoissonModel1D):
 
 #---------------------------------------------------------------------------------------------------
 # GLOBAL E0 VERSION WITH NUMBA ACCELERATION (NO SPATIAL VARIATION IN HOLTSMARK FIELD)
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=False)
 def _bspline_eval_vectors_numba_global_E0(c, c_b0, c_b1, c_amp, B, B_d1, B_d2):
     # Fast BLAS matrix multiplications
     phi_vec = B @ c
@@ -617,7 +617,7 @@ def _bspline_eval_vectors_numba_global_E0(c, c_b0, c_b1, c_amp, B, B_d1, B_d2):
     return phi_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec
 
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=False)
 def _calc_prior_res_numba_global_E0(c, c_b0, c_b1, c_amp, D, smooth_param):
     # Calculate penalties efficiently
     prior_res = np.sqrt(smooth_param) * (D @ c)
@@ -718,7 +718,7 @@ class BSplinePoissonModel1D_numba_globalE0(BSplinePoissonModel1D_numba):
 
 
 #------------------------LOWER RESOLUTION BACKGROUND---------------------------
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=False)
 def _bspline_eval_vectors_numba_split_basis(c, c_b0, c_b1, c_amp, B, B_d1, B_d2, B_bg):
     # Fast BLAS matrix multiplications
     phi_vec = B @ c
@@ -730,7 +730,7 @@ def _bspline_eval_vectors_numba_split_basis(c, c_b0, c_b1, c_amp, B, B_d1, B_d2,
     return phi_vec, E_vec, grad_vec, b0_vec, b1_vec, amp_vec
 
 
-@njit(fastmath=True, cache=True)
+@njit(fastmath=True, cache=False)
 def _calc_prior_res_numba_split_basis(c, c_b0, c_b1, c_amp, D, D_bg, smooth_param, smooth_param_bg):
     # Calculate penalties efficiently
     prior_res = np.sqrt(smooth_param) * (D @ c)
