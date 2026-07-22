@@ -13,6 +13,7 @@ keywords = []
 authors = [
   { name = "Mykhailo Vorobiov", email = "mvorobiov@wm.edu" },
 ]
+
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
@@ -24,7 +25,8 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = [    
+
+dependencies = [
     "qolab",
     "numpy>1",
     "scipy",
@@ -49,6 +51,7 @@ Source = "https://github.com/Michael Vorobiov/pinqued-tools"
 extra-dependencies = [
   "mypy>=1.0.0",
 ]
+
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/pinqued_tools tests}"
 
